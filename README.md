@@ -221,6 +221,25 @@ See [CHANGELOG.md](CHANGELOG.md) for details.
 
 ---
 
+## Using with MultiPay (multi-gateway orchestration)
+
+This plugin works standalone **and** as a gateway behind the **MultiPay**
+orchestrator. When MultiPay is the journal's selected payment plugin, it
+auto-detects Paystack and can route payments to it.
+
+- **Credentials.** MultiPay reads this plugin's `testPublicKey`, `testSecretKey`,
+  `livePublicKey` and `liveSecretKey` settings as a fallback, selecting Test or
+  Live by MultiPay's own Test Mode toggle. You can also enter Paystack keys
+  inline in MultiPay's settings group (those take priority).
+- **Currencies.** MultiPay offers Paystack for **NGN, USD, GHS, ZAR, KES, XOF**
+  (kept in sync with this plugin's supported set as of MultiPay 1.1.0.1).
+- **Webhook.** MultiPay uses its own webhook endpoint
+  (`{journalUrl}/payment/plugin/multipay/webhook/paystackplugin`, shown in the
+  MultiPay settings) for dispute alerts and asynchronous refund confirmation.
+  When running standalone, use this plugin's own callback/webhook URLs above.
+
+No Paystack-side changes are required to be orchestrated by MultiPay.
+
 ## Contributing
 
 Pull requests are welcome. Please open an issue first for anything beyond a small bug fix.
