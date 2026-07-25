@@ -2,7 +2,7 @@
 
 <table>
 <tr>
-<td><strong>Version</strong></td><td>1.3.0</td>
+<td><strong>Version</strong></td><td>1.4.0</td>
 <td><strong>OJS</strong></td><td>3.5.0+</td>
 <td><strong>PHP</strong></td><td>8.1+</td>
 <td><strong>License</strong></td><td>GPL-3.0-or-later</td>
@@ -48,7 +48,7 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 
 ### Manual
 
-1. Download `paystack-1.3.0.0.tar.gz` from the [Releases](../../releases) page.
+1. Download `paystack-1.4.0.0.tar.gz` from the [Releases](../../releases) page.
 2. Unpack into `plugins/paymethod/` so the result is `plugins/paymethod/paystack/`.
 3. In OJS go to **Settings › Website › Plugins › Plugin Categories › Payment Plugins** and enable **Paystack Payment Gateway**.
 4. In **Settings › Distribution › Payments**, enable payments, pick your currency, and choose Paystack as the payment method.
@@ -77,6 +77,7 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 | Trusted proxy hops | 1 | Number of reverse proxies in front of this server that append to `X-Forwarded-For`; the IP allowlist trusts the hop this many positions from the end of that header. Only relevant when the allowlist above is on. |
 | Scheduled reconciliation | on | Re-verifies pending payment attempts against Paystack every 15 minutes and fulfils any that actually succeeded. Requires a real cron entry running `php lib/pkp/tools/scheduler.php run` — see [Scheduled reconciliation](#scheduled-reconciliation) below. |
 | Reconciliation lookback window | 72 hours | How far back reconciliation looks for pending attempts to re-check; older attempts are assumed abandoned. |
+| Dispute/chargeback alerts | on | Email journal managers (and the journal contact) when Paystack reports a dispute or chargeback against a payment. |
 
 In your Paystack dashboard set the callback and webhook URLs shown on the settings page:
 
@@ -143,6 +144,49 @@ lookback window, under **Settings › Distribution › Payments**.
 
 ---
 
+## Disputes and chargebacks
+
+When Paystack reports a dispute or chargeback against one of the journal's
+payments (webhook events `charge.dispute.create`, `charge.dispute.remind`,
+`charge.dispute.resolve`), the plugin:
+
+- records the dispute locally in a `paystack_disputes` table (reference,
+  Paystack transaction id, dispute id, status, amount/currency, due date,
+  and the raw payload), keyed so a later `remind`/`resolve` event on the
+  same dispute updates the existing row instead of creating a duplicate;
+- emails journal managers and the journal contact an alert (toggle:
+  **Dispute/Chargeback Alerts**, on by default under Settings ›
+  Distribution › Payments).
+
+> **Note on Paystack's dispute payload.** This plugin does not have a way to
+> replay real dispute webhooks in its build/test environment, so the exact
+> field names read from Paystack's dispute payload (`id`, `status`,
+> `currency`, `refund_amount`/`amount`, `resolveBy`, and the nested
+> `transaction` object) are matched defensively with fallbacks, based on
+> Paystack's public Disputes API documentation rather than a captured
+> production payload. Verify against a live dispute webhook for your account
+> before relying on the recorded fields in production.
+
+## Refunding from another plugin
+
+Other plugins running in the same OJS process (for example, a submission-fee
+plugin that needs to issue a real refund when a submission is declined,
+rather than only flagging the payment for manual review) can call:
+
+```php
+$paystackPlugin->refundByCompletedPaymentId(int $contextId, int $completedPaymentId, ?float $amount = null): array
+// Returns ['success' => bool, 'reference' => ?string, 'error' => ?string]
+```
+
+This reuses exactly the same refund logic as the manager-facing Transactions
+UI — the cumulative-refund cap, the local refund record, and the payer
+notification email — via a shared internal helper. It is **not** exposed
+over HTTP and performs no authorization check of its own: the calling plugin
+is responsible for verifying the current user/process is authorized to
+refund that specific payment before calling it.
+
+---
+
 ## Security
 
 ### Temporary OJS APC ownership compatibility
@@ -165,6 +209,7 @@ minimum supported OJS release includes the core fix.
 | Payment tampering | Amount + currency + reference re-verified against the queued payment on callback and webhook |
 | Replay / double-fulfilment | DB-backed dedupe with TTL + unique-insert fulfilment guard |
 | Missed webhook / abandoned redirect | Optional scheduled reconciliation re-verifies pending attempts against Paystack every 15 minutes (see [Scheduled reconciliation](#scheduled-reconciliation)) |
+| Disputes / chargebacks | Captured locally and alerted to managers (see [Disputes and chargebacks](#disputes-and-chargebacks)) |
 | Card data / PCI | Never touches the journal server — Paystack-hosted checkout only |
 | Secrets | Masked in the settings UI; masked placeholders are never written back |
 | Transport | HTTPS enforced outside test mode |
@@ -183,6 +228,7 @@ Payment emails are sent automatically using OJS-native templates installed with 
 | `PAYSTACK_PAYMENT_CONFIRMATION_ADMIN` | Journal contact, on successful payment |
 | `PAYSTACK_PAYMENT_FAILED` | Payer, when a charge fails |
 | `PAYSTACK_PAYMENT_REFUNDED` | Payer, on full or partial refund (toggle: `notifyAuthorOnRefund`, on by default) |
+| `PAYSTACK_PAYMENT_DISPUTE` | Journal managers + contact, on a dispute/chargeback event (toggle: `notifyOnDispute`, on by default) |
 
 Due to an OJS restriction, paymethod plugins are only loaded on payment pages, so these templates cannot be *listed or edited* under **Settings › Emails** from this plugin alone (they still send correctly). The optional **Payment Method Support** companion addon bridges this gap — it makes the templates editable in the OJS UI and adds a theme-agnostic "Payment History" link to the user navigation. The addon is available to sponsors of this plugin; sponsorship funds ongoing maintenance and PKP-compatibility updates. Sponsor via **[GitHub Sponsors](https://github.com/sponsors/thathman)** or contact **hello@airixmedia.com**. Access is automatic: within the hour of sponsoring you'll receive a GitHub invitation to the private addon repository — accept it and download the addon from its Releases page.
 
@@ -255,7 +301,7 @@ plugins/themes/<yourtheme>/
 | 1.1.0 | Released | Optional webhook IP allowlist; TTL'd DB-backed idempotency; PKP-native install migrations |
 | 1.2.0 | Released | Submission-fee article title in payment descriptions; encrypted-at-rest API keys; local refund records with payer notification |
 | 1.3.0 | Released | Security-audit follow-ups (TTL'd webhook log purge, cumulative-refund guard, fail-closed fulfilment guard, configurable trusted-proxy hops); optional scheduled reconciliation for missed webhooks |
-| 1.4.0 | Planned | Split payments / subaccount support for multi-journal revenue sharing |
+| 1.4.0 | Released | Dispute/chargeback capture (local `paystack_disputes` records + manager email alerts); a stable in-process refund method for other plugins to call directly |
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 

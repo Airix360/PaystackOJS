@@ -620,3 +620,21 @@ msgstr "partially refunded"
 
 msgid "plugins.paymethod.paystack.refund.alreadyRefunded"
 msgstr "This payment has already been refunded."
+
+msgid "mailable.paystack.paymentDispute.name"
+msgstr "Paystack Dispute Alert"
+
+msgid "mailable.paystack.paymentDispute.description"
+msgstr "Email sent to journal managers when Paystack reports a dispute or chargeback against a payment."
+
+msgid "emails.paystack.paymentDispute.subject"
+msgstr "Paystack dispute alert — {$contextName}"
+
+msgid "emails.paystack.paymentDispute.body"
+msgstr "<p>A Paystack dispute/chargeback event was received.</p><p>Event: {$disputeEvent}<br>Reference: {$paymentReference}<br>Transaction ID: {$transactionId}<br>Dispute ID: {$disputeId}<br>Status: {$disputeStatus}<br>Amount: {$currencySymbol}{$disputeAmount} {$paymentCurrency}<br>Due: {$disputeDueAt}</p><p>Review this in your Paystack dashboard or the plugin's Transactions tab.</p><p>Regards,<br>{$contextName}</p>"
+
+msgid "plugins.paymethod.paystack.settings.notifyOnDispute"
+msgstr "Dispute/Chargeback Alerts"
+
+msgid "plugins.paymethod.paystack.settings.notifyOnDispute.description"
+msgstr "Email journal managers when Paystack reports a dispute or chargeback (charge.dispute.create, charge.dispute.remind, charge.dispute.resolve) against a payment."

@@ -68,3 +68,15 @@ msgstr "Currency Symbol"
 msgid "plugins.paymethod.paystack.email.contextLogoUrl"
 msgstr "Journal Logo URL"
 
+msgid "plugins.paymethod.paystack.email.disputeEvent"
+msgstr "Dispute event"
+
+msgid "plugins.paymethod.paystack.email.disputeId"
+msgstr "Dispute ID"
+
+msgid "plugins.paymethod.paystack.email.disputeStatus"
+msgstr "Dispute status"
+
+msgid "plugins.paymethod.paystack.email.disputeDueAt"
+msgstr "Dispute due date"
+

@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.4.0 - 2026-07-25
+
+### Added
+- **Dispute/chargeback capture**: the webhook now recognizes Paystack's
+  dispute events (`charge.dispute.create`, `charge.dispute.remind`,
+  `charge.dispute.resolve`), records them in a new `paystack_disputes`
+  table, and emails journal managers a dispute alert (new
+  `PAYSTACK_PAYMENT_DISPUTE` mailable, toggle: `notifyOnDispute`, on by
+  default), mirroring how the sibling FlutterwaveOJS plugin handles its own
+  dispute events. Field names read from Paystack's dispute payload are
+  matched defensively — see the README's
+  [Disputes and chargebacks](README.md#disputes-and-chargebacks) section for
+  the assumption this relies on.
+- **`PaystackPlugin::refundByCompletedPaymentId()`**: a stable, in-process
+  refund entrypoint other plugins can call directly (no HTTP/CSRF), intended
+  for a submission-fee plugin to trigger a real refund on submission
+  decline. Reuses the exact same refund logic as the manager-facing
+  Transactions UI — the cumulative-refund cap, the local refund record, and
+  the payer notification email — via a new shared `performRefund()` helper;
+  the HTTP-facing `manage()` 'refund' action was refactored to call the same
+  helper instead of duplicating the logic.
+
+### Documentation
+- Removed the "Split payments / subaccount support" roadmap item — this is
+  not being built.
+
 ## 1.3.0 - 2026-07-25
 
 ### Security

@@ -44,12 +44,16 @@ use APP\plugins\paymethod\paystack\mail\PaymentConfirmation;
 use APP\plugins\paymethod\paystack\mail\PaymentConfirmationAdmin;
 use APP\plugins\paymethod\paystack\mail\PaymentFailed;
 use APP\plugins\paymethod\paystack\mail\PaymentRefunded;
+use APP\plugins\paymethod\paystack\mail\PaymentDisputeAlert;
 require_once(dirname(__FILE__) . '/PaystackWebhookTableMigration.php');
+require_once(dirname(__FILE__) . '/PaystackDisputesTableMigration.php');
+require_once(dirname(__FILE__) . '/PaystackInstallMigration.php');
 require_once(dirname(__FILE__) . '/mail/traits/PaystackVariables.php');
 require_once(dirname(__FILE__) . '/mail/PaymentFailed.php');
 require_once(dirname(__FILE__) . '/mail/PaymentConfirmation.php');
 require_once(dirname(__FILE__) . '/mail/PaymentConfirmationAdmin.php');
 require_once(dirname(__FILE__) . '/mail/PaymentRefunded.php');
+require_once(dirname(__FILE__) . '/mail/PaymentDisputeAlert.php');
 require_once(dirname(__FILE__) . '/classes/SecretCipher.php');
 require_once(dirname(__FILE__) . '/classes/RefundGuard.php');
 require_once(dirname(__FILE__) . '/classes/ReconciliationDecider.php');
@@ -366,78 +370,24 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
                     $result['message'] = __('form.csrfInvalid');
                 } elseif (!$this->isPostRequest()) {
                     $result['message'] = __('common.invalidAction');
-                } elseif (empty($meta['reference'])) {
-                    $result['message'] = __('plugins.paymethod.paystack.error');
                 } else {
-                    try {
-                        $secretKey = $this->getSecretKey((int) $contextId);
-                        if (!$secretKey) {
-                            throw new \Exception('Missing secret key');
-                        }
-
-                        // Guard against cumulative over-refund: validate against what's
-                        // actually left (original total minus everything already
-                        // refunded locally), not just the original total — otherwise a
-                        // manager can click Refund repeatedly, each request individually
-                        // "valid" against the original amount.
-                        $originalAmount = (float) $p->getAmount();
-                        $alreadyRefunded = $this->getCumulativeRefunded($p->getId(), (int) $contextId);
-
-                        $amountVar = $request->getUserVar('amount');
-                        $requestedAmount = null;
-                        if ($amountVar !== null && trim((string) $amountVar) !== '') {
-                            $requestedAmount = (float) $amountVar;
-                        }
-
-                        try {
-                            $amountToRefund = RefundGuard::resolveRefundAmount($originalAmount, $alreadyRefunded, $requestedAmount);
-                        } catch (\InvalidArgumentException $e) {
-                            throw new \Exception($e->getMessage());
-                        }
-
-                        $payload = [
-                            'transaction' => (string) $meta['reference'],
-                            'amount' => (int) round($amountToRefund * 100),
-                        ];
-
-                        $client = new \GuzzleHttp\Client(['timeout' => 20, 'verify' => true, 'http_errors' => false]);
-                        $resp = $client->post(self::PAYSTACK_API_URL . '/refund', [
-                            'headers' => [
-                                'Authorization' => 'Bearer ' . $secretKey,
-                                'Content-Type' => 'application/json',
-                            ],
-                            'json' => $payload,
-                        ]);
-                        $body = json_decode((string) $resp->getBody(), true) ?: [];
-                        if (($body['status'] ?? false) !== true) {
-                            $msg = isset($body['message']) ? (string) $body['message'] : __('common.error');
-                            throw new \Exception($msg);
-                        }
-
-                        $refundReference = isset($body['data']['id'])
-                            ? (string) $body['data']['id']
-                            : (isset($body['data']['reference']) ? (string) $body['data']['reference'] : null);
-                        $newTotalRefunded = round($alreadyRefunded + $amountToRefund, 2);
-                        $isFullRefund = $newTotalRefunded >= round($originalAmount - 0.01, 2);
-
-                        // Local refund record + payment-status update, mirroring how
-                        // this plugin already records payment-status metadata
-                        // (storeTransactionMetadata) — a refund previously only ever
-                        // touched the Paystack API and left no local trace.
-                        $this->storeRefundRecord($p->getId(), (int) $contextId, $amountToRefund, $refundReference, $newTotalRefunded, $isFullRefund);
-                        // Refresh meta so the template reflects the new refund status.
-                        $meta = $this->getPaymentMetadata($p->getId(), $contextId) ?: [];
-
-                        // Notify the payer. The refund already succeeded at Paystack by
-                        // this point, so an email failure must not surface as an error.
-                        try {
-                            $this->sendPaymentRefundedEmail($context, $p, $meta, $amountToRefund, $newTotalRefunded, $originalAmount, $refundReference, $isFullRefund);
-                        } catch (\Throwable $e) { /* swallow */ }
-
-                        $result = ['ok' => true, 'message' => __('common.changesSaved')];
-                    } catch (\Throwable $e) {
-                        $result = ['ok' => false, 'message' => (string) $e->getMessage()];
+                    $amountVar = $request->getUserVar('amount');
+                    $requestedAmount = null;
+                    if ($amountVar !== null && trim((string) $amountVar) !== '') {
+                        $requestedAmount = (float) $amountVar;
                     }
+
+                    // Shared with refundByCompletedPaymentId() — this HTTP handler
+                    // owns the CSRF/POST checks above; performRefund() owns the
+                    // refund-cap guard, the Paystack API call, and the local
+                    // refund record + payer email.
+                    $refundResult = $this->performRefund($p, $context, $requestedAmount);
+                    $result = $refundResult['success']
+                        ? ['ok' => true, 'message' => __('common.changesSaved')]
+                        : ['ok' => false, 'message' => (string) ($refundResult['error'] ?: __('common.error'))];
+
+                    // Refresh meta so the template reflects the new refund status.
+                    $meta = $this->getPaymentMetadata($p->getId(), $contextId) ?: [];
                 }
                 $tm->assign('result', $result);
             }
@@ -598,6 +548,13 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
                 'label' => __('plugins.paymethod.paystack.settings.reconciliationWindowHours'),
                 'description' => __('plugins.paymethod.paystack.settings.reconciliationWindowHours.description'),
                 'value' => (string) ((int) ($this->getSetting($contextId, 'reconciliationWindowHours') ?: 72)),
+                'groupId' => 'paystackpayment',
+            ]))
+            ->addField(new \PKP\components\forms\FieldOptions('notifyOnDispute', [
+                'label' => __('plugins.paymethod.paystack.settings.notifyOnDispute'),
+                'description' => __('plugins.paymethod.paystack.settings.notifyOnDispute.description'),
+                'options' => [['value' => true, 'label' => __('common.enable')]],
+                'value' => (bool) ($this->getSetting($contextId, 'notifyOnDispute') ?? true),
                 'groupId' => 'paystackpayment',
             ]));
 
@@ -861,7 +818,7 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
         }
 
         // Toggles (optional – only saved if provided)
-        foreach (['testMode','enforceIpAllowlist','reconciliationEnabled'] as $k) {
+        foreach (['testMode','enforceIpAllowlist','reconciliationEnabled','notifyOnDispute'] as $k) {
             if (array_key_exists($k, $all)) {
                 $toSave[$k] = $all[$k] === true || $all[$k] === 'true' || $all[$k] === 1 || $all[$k] === '1';
             }
@@ -1113,6 +1070,21 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
                     try { $this->sendPaymentConfirmationEmails($journal, $queuedPayment, $reference, $transactionId); } catch (\Throwable $e) { /* swallow */ }
                 }
 
+                http_response_code(200); echo json_encode(['status'=>true]); exit;
+            }
+
+            // Capture disputes/chargebacks for manager visibility, mirroring
+            // how the sibling FlutterwaveOJS plugin handles its own dispute
+            // events. Paystack's documented dispute webhook events are
+            // `charge.dispute.create`, `charge.dispute.remind`, and
+            // `charge.dispute.resolve` (see Paystack's Disputes API docs).
+            if (in_array($event, ['charge.dispute.create', 'charge.dispute.remind', 'charge.dispute.resolve'], true)) {
+                try {
+                    $this->handleDisputeEvent($contextId, $journal, $event, $data, $eventData, $reference);
+                } catch (\Throwable $e) {
+                    Logger::error($contextId, 'Paystack dispute event handling failed', ['error' => $e->getMessage()]);
+                }
+                if ($reference) { $this->markWebhookEventProcessed($contextId, $event, $reference); }
                 http_response_code(200); echo json_encode(['status'=>true]); exit;
             }
 
@@ -1541,6 +1513,311 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
         $this->dispatchConfiguredMailable($mailable, $context, $payer, null,
             'Payment refunded — {$contextName}',
             '<p>Dear {$recipientName},</p><p>Your payment for <strong>{$paymentName}</strong> has been {$refundStatus}.</p><p>Amount refunded: <strong>{$currencySymbol}{$refundedAmount}</strong> (total refunded to date: {$currencySymbol}{$totalRefundedAmount}).</p><p>Original reference: {$paymentReference}<br>Date: {$refundDate}</p><p>Regards,<br>{$contextName}</p>');
+    }
+
+    /**
+     * Shared refund implementation. Reused by both the HTTP-facing
+     * manage() 'refund' action and the public refundByCompletedPaymentId()
+     * entrypoint, so the cumulative-refund cap, the Paystack API call, the
+     * local refund record, and the payer notification email exist in
+     * exactly one place.
+     *
+     * This method performs NO authorization or CSRF check of its own —
+     * callers are responsible for verifying the caller may refund this
+     * payment before invoking it. It only requires a Paystack transaction
+     * reference to already be recorded in the payment's metadata.
+     *
+     * @param \APP\payment\ojs\OJSCompletedPayment $completedPayment
+     * @param \APP\journal\Journal $context
+     * @param float|null $requestedAmount Partial refund amount in major
+     *   currency units, or null to refund the full remaining balance.
+     *
+     * @return array{success: bool, reference: ?string, error: ?string}
+     */
+    private function performRefund($completedPayment, $context, ?float $requestedAmount): array
+    {
+        $contextId = (int) $context->getId();
+        $completedPaymentId = $completedPayment->getId();
+
+        try {
+            $meta = $this->getPaymentMetadata($completedPaymentId, $contextId) ?: [];
+            if (empty($meta['reference'])) {
+                return ['success' => false, 'reference' => null, 'error' => __('plugins.paymethod.paystack.error')];
+            }
+
+            $secretKey = $this->getSecretKey($contextId);
+            if (!$secretKey) {
+                return ['success' => false, 'reference' => null, 'error' => 'Missing secret key'];
+            }
+
+            // Guard against cumulative over-refund: validate against what's
+            // actually left (original total minus everything already
+            // refunded locally), not just the original total — otherwise a
+            // caller can trigger a refund repeatedly, each request individually
+            // "valid" against the original amount.
+            $originalAmount = (float) $completedPayment->getAmount();
+            $alreadyRefunded = $this->getCumulativeRefunded($completedPaymentId, $contextId);
+
+            try {
+                $amountToRefund = RefundGuard::resolveRefundAmount($originalAmount, $alreadyRefunded, $requestedAmount);
+            } catch (\InvalidArgumentException $e) {
+                return ['success' => false, 'reference' => null, 'error' => $e->getMessage()];
+            }
+
+            $payload = [
+                'transaction' => (string) $meta['reference'],
+                'amount' => (int) round($amountToRefund * 100),
+            ];
+
+            $client = new \GuzzleHttp\Client(['timeout' => 20, 'verify' => true, 'http_errors' => false]);
+            $resp = $client->post(self::PAYSTACK_API_URL . '/refund', [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $secretKey,
+                    'Content-Type' => 'application/json',
+                ],
+                'json' => $payload,
+            ]);
+            $body = json_decode((string) $resp->getBody(), true) ?: [];
+            if (($body['status'] ?? false) !== true) {
+                $msg = isset($body['message']) ? (string) $body['message'] : __('common.error');
+                return ['success' => false, 'reference' => null, 'error' => $msg];
+            }
+
+            $refundReference = isset($body['data']['id'])
+                ? (string) $body['data']['id']
+                : (isset($body['data']['reference']) ? (string) $body['data']['reference'] : null);
+            $newTotalRefunded = round($alreadyRefunded + $amountToRefund, 2);
+            $isFullRefund = $newTotalRefunded >= round($originalAmount - 0.01, 2);
+
+            // Local refund record + payment-status update, mirroring how
+            // this plugin already records payment-status metadata
+            // (storeTransactionMetadata) — a refund previously only ever
+            // touched the Paystack API and left no local trace.
+            $this->storeRefundRecord($completedPaymentId, $contextId, $amountToRefund, $refundReference, $newTotalRefunded, $isFullRefund);
+            $meta = $this->getPaymentMetadata($completedPaymentId, $contextId) ?: [];
+
+            // Notify the payer. The refund already succeeded at Paystack by
+            // this point, so an email failure must not surface as an error.
+            try {
+                $this->sendPaymentRefundedEmail($context, $completedPayment, $meta, $amountToRefund, $newTotalRefunded, $originalAmount, $refundReference, $isFullRefund);
+            } catch (\Throwable $e) { /* swallow */ }
+
+            return ['success' => true, 'reference' => $refundReference, 'error' => null];
+        } catch (\Throwable $e) {
+            return ['success' => false, 'reference' => null, 'error' => (string) $e->getMessage()];
+        }
+    }
+
+    /**
+     * Trigger a Paystack refund for a completed payment directly, without
+     * going through the HTTP-facing manage() 'refund' action. Intended for
+     * other plugins running in the same request (e.g. submissionFee-OJS) to
+     * call in-process — for example to issue a real refund when a
+     * submission is declined, instead of only flagging the payment for
+     * manual review.
+     *
+     * SECURITY: this method performs NO authorization check of its own and
+     * is NOT registered on any route — it is not reachable over HTTP by
+     * itself. The caller MUST already have verified that the current
+     * user/process is authorized to refund this specific payment before
+     * calling this method. It reuses the exact same guards as the
+     * HTTP-facing refund action via the shared performRefund() helper: the
+     * cumulative-refund cap (RefundGuard), a local refund record, and the
+     * payer notification email.
+     *
+     * @param int $contextId Journal/context id the payment belongs to.
+     * @param int $completedPaymentId The OJS completed_payment id to refund.
+     * @param float|null $amount Partial refund amount in major currency
+     *   units, or null to refund the full remaining balance.
+     *
+     * @return array{success: bool, reference: ?string, error: ?string}
+     */
+    public function refundByCompletedPaymentId(int $contextId, int $completedPaymentId, ?float $amount = null): array
+    {
+        $context = Repo::journal()->get($contextId);
+        if (!$context) {
+            return ['success' => false, 'reference' => null, 'error' => 'Unknown context'];
+        }
+
+        $completedPaymentDao = DAORegistry::getDAO('OJSCompletedPaymentDAO'); /** @var \APP\payment\ojs\OJSCompletedPaymentDAO $completedPaymentDao */
+        $completedPayment = $completedPaymentDao->getById($completedPaymentId);
+        if (!$completedPayment || (int) $completedPayment->getContextId() !== $contextId) {
+            return ['success' => false, 'reference' => null, 'error' => 'Payment not found for this context'];
+        }
+
+        return $this->performRefund($completedPayment, $context, $amount);
+    }
+
+    /**
+     * Handle a Paystack dispute/chargeback webhook event
+     * (`charge.dispute.create` / `charge.dispute.remind` /
+     * `charge.dispute.resolve`): record it locally and alert managers.
+     *
+     * ASSUMPTION: Paystack's dispute payload shape is derived from Paystack's
+     * public Disputes API documentation (a `data` object with `id`, `status`,
+     * `currency`, `refund_amount` (or `amount`), `resolveBy`, and a nested
+     * `transaction` object carrying `id`/`reference`/`amount`/`currency`).
+     * Field names are matched defensively (multiple fallbacks below) since
+     * this plugin has no way to replay real dispute webhooks in this
+     * environment; verify against a live Paystack dispute payload before
+     * relying on this in production.
+     */
+    private function handleDisputeEvent(int $contextId, $journal, string $event, array $data, array $eventData, ?string $reference): void
+    {
+        $tx = (array) ($data['transaction'] ?? []);
+        $status = strtolower((string) ($data['status'] ?? 'pending'));
+        $providerDisputeId = isset($data['id']) ? (string) $data['id'] : null;
+        $providerTxId = isset($tx['id'])
+            ? (string) $tx['id']
+            : (isset($data['transaction_id']) ? (string) $data['transaction_id'] : null);
+        $disputeReference = $reference ?: (isset($tx['reference']) ? (string) $tx['reference'] : null);
+
+        // Amounts arrive in kobo/cents, like every other Paystack amount field.
+        $rawAmount = $data['refund_amount'] ?? $data['amount'] ?? ($tx['amount'] ?? null);
+        $amount = $rawAmount !== null ? ((float) $rawAmount / 100) : null;
+        $currency = isset($data['currency'])
+            ? strtoupper((string) $data['currency'])
+            : (isset($tx['currency']) ? strtoupper((string) $tx['currency']) : null);
+        $dueAt = isset($data['resolveBy'])
+            ? (string) $data['resolveBy']
+            : (isset($data['due_at']) ? (string) $data['due_at'] : null);
+
+        $this->storeDisputeRecord($contextId, $event, $disputeReference, $providerTxId, $providerDisputeId, $status, $amount, $currency, $dueAt, $eventData);
+
+        Logger::warning($contextId, 'Paystack dispute/chargeback event received', [
+            'event' => $event,
+            'reference' => $disputeReference,
+            'providerDisputeId' => $providerDisputeId,
+            'providerTxId' => $providerTxId,
+            'status' => $status,
+        ]);
+
+        try {
+            $this->notifyDisputeManagers($journal, $event, $disputeReference, $providerTxId, $providerDisputeId, $status, $amount, $currency, $dueAt);
+        } catch (\Throwable $e) {
+            Logger::warning($contextId, 'Paystack dispute manager alert failed', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Insert or update the local `paystack_disputes` row for a dispute,
+     * keyed on provider_dispute_id when available so a later
+     * `charge.dispute.remind` / `charge.dispute.resolve` event updates the
+     * same row rather than creating a duplicate.
+     */
+    private function storeDisputeRecord(
+        int $contextId,
+        string $event,
+        ?string $reference,
+        ?string $providerTxId,
+        ?string $providerDisputeId,
+        string $status,
+        ?float $amount,
+        ?string $currency,
+        ?string $dueAt,
+        array $payload = []
+    ): void {
+        try {
+            if (!Schema::hasTable('paystack_disputes')) {
+                return;
+            }
+            $row = [
+                'context_id' => $contextId,
+                'event' => substr($event, 0, 64),
+                'reference' => $reference ? substr($reference, 0, 128) : null,
+                'provider_tx_id' => $providerTxId ? substr($providerTxId, 0, 128) : null,
+                'provider_dispute_id' => $providerDisputeId ? substr($providerDisputeId, 0, 128) : null,
+                'status' => substr($status, 0, 32) ?: 'pending',
+                'amount' => $amount,
+                'currency' => $currency ? substr($currency, 0, 8) : null,
+                'due_at' => $dueAt ?: null,
+                'payload' => !empty($payload) ? json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null,
+                'updated_at' => date('Y-m-d H:i:s'),
+            ];
+
+            $existingId = null;
+            if ($providerDisputeId) {
+                $existing = DB::table('paystack_disputes')
+                    ->where('context_id', '=', $contextId)
+                    ->where('provider_dispute_id', '=', $providerDisputeId)
+                    ->first();
+                $existingId = $existing->dispute_id ?? null;
+            }
+
+            if ($existingId) {
+                DB::table('paystack_disputes')->where('dispute_id', '=', $existingId)->update($row);
+                return;
+            }
+
+            $row['created_at'] = date('Y-m-d H:i:s');
+            DB::table('paystack_disputes')->insert($row);
+        } catch (\Throwable $e) {
+            Logger::error($contextId, 'Paystack dispute record store failed', ['error' => $e->getMessage()]);
+        }
+    }
+
+    /**
+     * Email journal managers (and the journal contact) about a dispute or
+     * chargeback event, using the same Mailable + dispatchConfiguredMailable
+     * pattern the plugin already uses for payment confirmation/refund mail,
+     * rather than the raw Mail::raw() approach.
+     */
+    private function notifyDisputeManagers(
+        $context,
+        string $event,
+        ?string $reference,
+        ?string $providerTxId,
+        ?string $providerDisputeId,
+        string $status,
+        ?float $amount,
+        ?string $currency,
+        ?string $dueAt
+    ): void {
+        $contextId = (int) $context->getId();
+        if (!((bool) ($this->getSetting($contextId, 'notifyOnDispute') ?? true))) {
+            return;
+        }
+
+        $emails = [];
+        $contactEmail = (string) ($context->getData('contactEmail') ?: '');
+        if ($contactEmail !== '') {
+            $emails[$contactEmail] = (string) ($context->getData('contactName') ?: $context->getLocalizedName());
+        }
+        try {
+            $rows = DB::table('users AS u')
+                ->join('user_user_groups AS uug', 'u.user_id', '=', 'uug.user_id')
+                ->join('user_groups AS ug', 'uug.user_group_id', '=', 'ug.user_group_id')
+                ->where('ug.context_id', '=', $contextId)
+                ->whereIn('ug.role_id', [Role::ROLE_ID_MANAGER, Role::ROLE_ID_SUBSCRIPTION_MANAGER])
+                ->where('u.disabled', '=', 0)
+                ->select(['u.email'])
+                ->get();
+            foreach ($rows as $row) {
+                $email = (string) ($row->email ?? '');
+                if ($email !== '' && !isset($emails[$email])) {
+                    $emails[$email] = $email;
+                }
+            }
+        } catch (\Throwable $e) {
+            Logger::warning($contextId, 'Paystack dispute manager lookup failed', ['error' => $e->getMessage()]);
+        }
+
+        if (empty($emails)) {
+            Logger::warning($contextId, 'Paystack dispute alert skipped: no recipients', ['event' => $event, 'reference' => $reference]);
+            return;
+        }
+
+        $currencySymbol = self::getCurrencySymbol((string) $currency);
+        foreach ($emails as $email => $name) {
+            try {
+                $mailable = new PaymentDisputeAlert($context, $event, $reference, $providerTxId, $providerDisputeId, $status, $amount, $currencySymbol, $currency, $dueAt);
+                $this->dispatchConfiguredMailable($mailable, $context, null, [$email, $name],
+                    'Paystack dispute alert — {$contextName}',
+                    '<p>A Paystack dispute/chargeback event was received.</p><p>Event: {$disputeEvent}<br>Reference: {$paymentReference}<br>Transaction ID: {$transactionId}<br>Dispute ID: {$disputeId}<br>Status: {$disputeStatus}<br>Amount: {$currencySymbol}{$disputeAmount} {$paymentCurrency}<br>Due: {$disputeDueAt}</p><p>Review this in your Paystack dashboard or the plugin\'s Transactions tab.</p><p>Regards,<br>{$contextName}</p>');
+            } catch (\Throwable $e) {
+                Logger::warning($contextId, 'Paystack dispute alert send failed', ['email' => $email, 'error' => $e->getMessage()]);
+            }
+        }
     }
 
     /**
@@ -1975,7 +2252,7 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
     public function addMailable(string $hookName, array $args): void
     {
         $mailables = $args[0]; /** @var \Illuminate\Support\Collection $mailables */
-        foreach ([PaymentConfirmation::class, PaymentConfirmationAdmin::class, PaymentFailed::class, PaymentRefunded::class] as $mailableClass) {
+        foreach ([PaymentConfirmation::class, PaymentConfirmationAdmin::class, PaymentFailed::class, PaymentRefunded::class, PaymentDisputeAlert::class] as $mailableClass) {
             if (!$mailables->contains($mailableClass)) {
                 $mailables->push($mailableClass);
             }
@@ -1987,10 +2264,14 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
      *
      * Returning the migration here lets PKP's native install machinery
      * (Plugin::register → Installer::postInstall → Plugin::updateSchema, and
-     * the installPluginVersion.php CLI tool) create the plugin tables.
+     * the installPluginVersion.php CLI tool) create the plugin tables. Runs
+     * every table-creating migration this plugin owns (webhook/dedupe/
+     * fulfillment-guard/reconciliation tables, plus the disputes table),
+     * so both fresh installs and version-bump upgrades on existing installs
+     * pick up new tables.
      */
     public function getInstallMigration()
     {
-        return new PaystackWebhookTableMigration();
+        return new PaystackInstallMigration();
     }
 }
