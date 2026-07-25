@@ -32,10 +32,14 @@ use PKP\plugins\Hook;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PKP\plugins\PaymethodPlugin;
+use PKP\plugins\interfaces\HasTaskScheduler;
+use PKP\scheduledTask\PKPScheduler;
 use APP\plugins\paymethod\paystack\classes\Logger;
 use APP\plugins\paymethod\paystack\classes\ApcOwnerCompatibility;
 use APP\plugins\paymethod\paystack\classes\SecretCipher;
 use APP\plugins\paymethod\paystack\classes\RefundGuard;
+use APP\plugins\paymethod\paystack\classes\ReconciliationDecider;
+use APP\plugins\paymethod\paystack\classes\tasks\ReconcilePendingTransactions;
 use APP\plugins\paymethod\paystack\mail\PaymentConfirmation;
 use APP\plugins\paymethod\paystack\mail\PaymentConfirmationAdmin;
 use APP\plugins\paymethod\paystack\mail\PaymentFailed;
@@ -48,8 +52,10 @@ require_once(dirname(__FILE__) . '/mail/PaymentConfirmationAdmin.php');
 require_once(dirname(__FILE__) . '/mail/PaymentRefunded.php');
 require_once(dirname(__FILE__) . '/classes/SecretCipher.php');
 require_once(dirname(__FILE__) . '/classes/RefundGuard.php');
+require_once(dirname(__FILE__) . '/classes/ReconciliationDecider.php');
+require_once(dirname(__FILE__) . '/classes/tasks/ReconcilePendingTransactions.php');
 
-class PaystackPlugin extends PaymethodPlugin
+class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
 {
     /**
      * Avoid duplicate hook registrations when the plugin is loaded from multiple categories.
@@ -146,6 +152,23 @@ class PaystackPlugin extends PaymethodPlugin
             self::$hooksRegistered = true;
         }
         return true;
+    }
+
+    /**
+     * @copydoc \PKP\plugins\interfaces\HasTaskScheduler::registerSchedules()
+     *
+     * Discovered by PKP's scheduler when it loads all plugins under CLI
+     * (php lib/pkp/tools/scheduler.php run); the web-based runner does not
+     * load paymethod plugins, so a real cron entry is required for this to
+     * actually run.
+     */
+    public function registerSchedules(PKPScheduler $scheduler): void
+    {
+        $scheduler
+            ->addSchedule(new ReconcilePendingTransactions([]))
+            ->everyFifteenMinutes()
+            ->name(ReconcilePendingTransactions::class)
+            ->withoutOverlapping();
     }
 
     /**
@@ -563,6 +586,19 @@ class PaystackPlugin extends PaymethodPlugin
                 'description' => __('plugins.paymethod.paystack.settings.trustedProxyHops.description'),
                 'value' => (string) $this->getTrustedProxyHops($contextId),
                 'groupId' => 'paystackpayment',
+            ]))
+            ->addField(new \PKP\components\forms\FieldOptions('reconciliationEnabled', [
+                'label' => __('plugins.paymethod.paystack.settings.reconciliationEnabled'),
+                'description' => __('plugins.paymethod.paystack.settings.reconciliationEnabled.description'),
+                'options' => [['value' => true, 'label' => __('common.enable')]],
+                'value' => (bool) ($this->getSetting($contextId, 'reconciliationEnabled') ?? true),
+                'groupId' => 'paystackpayment',
+            ]))
+            ->addField(new \PKP\components\forms\FieldText('reconciliationWindowHours', [
+                'label' => __('plugins.paymethod.paystack.settings.reconciliationWindowHours'),
+                'description' => __('plugins.paymethod.paystack.settings.reconciliationWindowHours.description'),
+                'value' => (string) ((int) ($this->getSetting($contextId, 'reconciliationWindowHours') ?: 72)),
+                'groupId' => 'paystackpayment',
             ]));
 
     }
@@ -583,6 +619,161 @@ class PaystackPlugin extends PaymethodPlugin
         if (!$json) return [];
         $data = json_decode((string) $json, true);
         return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Record a pending checkout attempt at initiate() time, before Paystack
+     * has charged anything. This is the only durable trace of an attempt
+     * whose webhook never arrives and whose payer never completes the
+     * browser redirect back to /callback — the reconciliation task uses it
+     * to find work. Best-effort: if the table is missing (pre-migration
+     * install) the checkout still proceeds normally, it just won't be
+     * eligible for self-healing.
+     */
+    public function recordPendingTransaction(int $contextId, int $queuedPaymentId, string $reference, float $amount, string $currency): void
+    {
+        try {
+            if (!Schema::hasTable('paystack_transactions')) {
+                return;
+            }
+            DB::table('paystack_transactions')->insert([
+                'context_id' => $contextId,
+                'queued_payment_id' => $queuedPaymentId,
+                'reference' => substr($reference, 0, 128),
+                'status' => 'pending',
+                'amount' => $amount,
+                'currency' => strtoupper($currency),
+                'created_at' => date('Y-m-d H:i:s'),
+                'updated_at' => date('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $e) {
+            // Never block checkout on bookkeeping.
+        }
+    }
+
+    /**
+     * Update the pending-transaction ledger row for a reference once the
+     * webhook or callback path has settled it, so reconciliation doesn't
+     * waste an API call re-checking something already resolved.
+     */
+    private function markTransactionRowStatus(int $contextId, string $reference, string $status): void
+    {
+        try {
+            if ($reference === '' || !Schema::hasTable('paystack_transactions')) {
+                return;
+            }
+            DB::table('paystack_transactions')
+                ->where('context_id', '=', $contextId)
+                ->where('reference', '=', $reference)
+                ->update(['status' => $status, 'updated_at' => date('Y-m-d H:i:s')]);
+        } catch (\Throwable $e) {
+            // Best-effort bookkeeping only.
+        }
+    }
+
+    /**
+     * Re-verify pending Paystack transaction attempts against the gateway
+     * and fulfil the ones that actually succeeded. Called by the
+     * ReconcilePendingTransactions scheduled task (php lib/pkp/tools/scheduler.php run).
+     *
+     * Reuses the same amount/currency checks and fulfillPaymentAtomically()
+     * guard the webhook and callback paths already use, so this can never
+     * fulfil a payment those paths would reject, and is safe to run
+     * repeatedly over the same rows.
+     */
+    public function runReconciliation(int $contextId, ?int $hours = null): array
+    {
+        $result = ['checked' => 0, 'fulfilled' => 0, 'failed' => 0];
+        if (!Schema::hasTable('paystack_transactions')) {
+            return $result;
+        }
+        $windowHours = max(1, (int) ($hours ?? ((int) ($this->getSetting($contextId, 'reconciliationWindowHours') ?: 72))));
+        $cutoff = date('Y-m-d H:i:s', time() - $windowHours * 3600);
+
+        $journal = Repo::journal()->get($contextId) ?? null;
+        if (!$journal) {
+            return $result;
+        }
+
+        $rows = DB::table('paystack_transactions')
+            ->where('context_id', '=', $contextId)
+            ->where('status', '=', 'pending')
+            ->where('created_at', '>=', $cutoff)
+            ->limit(200)
+            ->get();
+
+        $request = Application::get()->getRequest();
+
+        foreach ($rows as $row) {
+            $result['checked']++;
+            $reference = (string) $row->reference;
+            try {
+                $alreadyCompleted = (bool) $this->getCompletedPaymentByReference($reference, $contextId);
+                if ($alreadyCompleted) {
+                    $this->markTransactionRowStatus($contextId, $reference, 'completed');
+                    continue;
+                }
+
+                $queuedPaymentDao = \PKP\db\DAORegistry::getDAO('QueuedPaymentDAO'); /** @var \PKP\payment\QueuedPaymentDAO $queuedPaymentDao */
+                $queuedPayment = $queuedPaymentDao ? $queuedPaymentDao->getById((int) $row->queued_payment_id) : null;
+                if (!$queuedPayment || (int) $queuedPayment->getContextId() !== $contextId) {
+                    $this->markTransactionRowStatus($contextId, $reference, 'orphaned');
+                    continue;
+                }
+
+                $verify = $this->verifyTransaction($contextId, $reference);
+                $data = (array) ($verify['data'] ?? []);
+                $verifiedStatus = (string) ($data['status'] ?? '');
+                $verifiedAmount = isset($data['amount']) ? ((float) $data['amount'] / 100) : null; // kobo → major
+                $verifiedCurrency = isset($data['currency']) ? strtoupper((string) $data['currency']) : '';
+
+                $action = ReconciliationDecider::decide(
+                    (string) $row->status,
+                    false,
+                    $verifiedStatus,
+                    (float) $queuedPayment->getAmount(),
+                    strtoupper((string) $queuedPayment->getCurrencyCode()),
+                    $verifiedAmount,
+                    $verifiedCurrency
+                );
+
+                if ($action === ReconciliationDecider::ACTION_MARK_FAILED) {
+                    $this->markTransactionRowStatus($contextId, $reference, 'failed');
+                    continue;
+                }
+                if ($action !== ReconciliationDecider::ACTION_FULFILL) {
+                    continue; // leave pending, check again next run
+                }
+
+                $transactionId = isset($data['id']) ? $this->sanitizeInput((string) $data['id'], 'token') : null;
+                $fulfilled = $this->fulfillPaymentAtomically($request, $journal, $queuedPayment, $reference);
+                if (!$fulfilled) {
+                    // Already claimed by a webhook/callback that raced this run.
+                    $this->markTransactionRowStatus($contextId, $reference, 'completed');
+                    continue;
+                }
+
+                $this->markTransactionRowStatus($contextId, $reference, 'completed');
+                $completed = $this->getCompletedPaymentByAssoc($queuedPayment);
+                if ($completed) {
+                    $this->storeTransactionMetadata($completed->getId(), $contextId, $reference, $transactionId);
+                }
+                try {
+                    $this->sendPaymentConfirmationEmails($journal, $queuedPayment, $reference, $transactionId);
+                } catch (\Throwable $e) {
+                    // Swallow: fulfilment already succeeded, email is best-effort.
+                }
+                $result['fulfilled']++;
+            } catch (\Throwable $e) {
+                $result['failed']++;
+                Logger::error($contextId, 'Paystack reconciliation row failed', [
+                    'reference' => $reference,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $result;
     }
 
     private function verifyTransaction(int $contextId, string $reference): array
@@ -670,7 +861,7 @@ class PaystackPlugin extends PaymethodPlugin
         }
 
         // Toggles (optional – only saved if provided)
-        foreach (['testMode','enforceIpAllowlist'] as $k) {
+        foreach (['testMode','enforceIpAllowlist','reconciliationEnabled'] as $k) {
             if (array_key_exists($k, $all)) {
                 $toSave[$k] = $all[$k] === true || $all[$k] === 'true' || $all[$k] === 1 || $all[$k] === '1';
             }
@@ -688,6 +879,13 @@ class PaystackPlugin extends PaymethodPlugin
             $hops = (int) $all['trustedProxyHops'];
             if ($hops < 1) { $hops = 1; }
             $toSave['trustedProxyHops'] = $hops;
+        }
+
+        // Reconciliation lookback window in hours (default 72).
+        if (array_key_exists('reconciliationWindowHours', $all)) {
+            $hours = (int) $all['reconciliationWindowHours'];
+            if ($hours < 1) { $hours = 72; }
+            $toSave['reconciliationWindowHours'] = $hours;
         }
 
         foreach ($toSave as $k => $v) {
@@ -868,7 +1066,10 @@ class PaystackPlugin extends PaymethodPlugin
                 if ($event === 'charge.failed') {
                     // Send fail email if enabled
                     try { $this->sendPaymentConfirmationEmails($journal, $queuedPayment, (string)$reference, $transactionId, true); } catch (\Throwable $e) { /* swallow */ }
-                    if ($reference) { $this->markWebhookEventProcessed($contextId, $event, $reference); }
+                    if ($reference) {
+                        $this->markWebhookEventProcessed($contextId, $event, $reference);
+                        $this->markTransactionRowStatus($contextId, $reference, 'failed');
+                    }
                     http_response_code(200); echo json_encode(['status'=>true]); exit;
                 }
 
@@ -876,7 +1077,11 @@ class PaystackPlugin extends PaymethodPlugin
                 // Idempotent: already completed?
                 if ($reference) {
                     $completed = $this->getCompletedPaymentByReference($reference, $contextId);
-                    if ($completed) { $this->markWebhookEventProcessed($contextId, $event, $reference); http_response_code(200); echo json_encode(['status'=>true,'message'=>'Already processed']); exit; }
+                    if ($completed) {
+                        $this->markWebhookEventProcessed($contextId, $event, $reference);
+                        $this->markTransactionRowStatus($contextId, $reference, 'completed');
+                        http_response_code(200); echo json_encode(['status'=>true,'message'=>'Already processed']); exit;
+                    }
                 }
 
                 // Fulfill (guarded against the webhook/callback race)
@@ -903,6 +1108,7 @@ class PaystackPlugin extends PaymethodPlugin
                     $completed = $this->getCompletedPaymentByAssoc($queuedPayment);
                     if ($completed) { $this->storeTransactionMetadata($completed->getId(), $contextId, $reference, $transactionId); }
                     $this->markWebhookEventProcessed($contextId, $event, $reference);
+                    $this->markTransactionRowStatus($contextId, $reference, 'completed');
                     // Send emails (idempotent)
                     try { $this->sendPaymentConfirmationEmails($journal, $queuedPayment, $reference, $transactionId); } catch (\Throwable $e) { /* swallow */ }
                 }
@@ -965,6 +1171,7 @@ class PaystackPlugin extends PaymethodPlugin
                     $completed = $this->getCompletedPaymentByAssoc($queuedPayment);
                     if ($completed) { $this->storeTransactionMetadata($completed->getId(), $contextId, $reference, $txId); }
                 }
+                $this->markTransactionRowStatus($contextId, $reference, 'completed');
                 // Send emails (idempotent)
                 try { $this->sendPaymentConfirmationEmails($journal, $queuedPayment, $reference, $txId ?? null); } catch (\Throwable $e) { /* swallow */ }
             } catch (\Exception $e) {
@@ -1768,7 +1975,7 @@ class PaystackPlugin extends PaymethodPlugin
     public function addMailable(string $hookName, array $args): void
     {
         $mailables = $args[0]; /** @var \Illuminate\Support\Collection $mailables */
-        foreach ([PaymentConfirmation::class, PaymentConfirmationAdmin::class, PaymentFailed::class] as $mailableClass) {
+        foreach ([PaymentConfirmation::class, PaymentConfirmationAdmin::class, PaymentFailed::class, PaymentRefunded::class] as $mailableClass) {
             if (!$mailables->contains($mailableClass)) {
                 $mailables->push($mailableClass);
             }

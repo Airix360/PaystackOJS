@@ -585,6 +585,21 @@ msgstr "Trusted Proxy Hops"
 msgid "plugins.paymethod.paystack.settings.trustedProxyHops.description"
 msgstr "Number of reverse proxies (load balancer, CDN, etc.) in front of this server that append to X-Forwarded-For. The IP allowlist trusts the hop this many positions from the end of that header. Default 1 (a single trusted proxy). Increase only if you run more than one trusted proxy hop; leaving this too high makes the allowlist spoofable."
 
+msgid "plugins.paymethod.paystack.settings.reconciliationEnabled"
+msgstr "Scheduled Reconciliation"
+
+msgid "plugins.paymethod.paystack.settings.reconciliationEnabled.description"
+msgstr "Every 15 minutes, re-check any payment attempt still pending against Paystack directly and fulfil it if Paystack confirms success. Heals the rare case where both the webhook and the payer's browser redirect never reach this server. Requires the OJS scheduled-task cron entry (php lib/pkp/tools/scheduler.php run) to be configured on the server."
+
+msgid "plugins.paymethod.paystack.settings.reconciliationWindowHours"
+msgstr "Reconciliation Lookback Window (hours)"
+
+msgid "plugins.paymethod.paystack.settings.reconciliationWindowHours.description"
+msgstr "How far back the reconciliation task looks for pending attempts to re-check. Default 72 hours; attempts older than this are assumed abandoned by the payer and are left alone."
+
+msgid "plugins.paymethod.paystack.task.reconcile"
+msgstr "Paystack transaction reconciliation"
+
 msgid "mailable.paystack.paymentRefunded.name"
 msgstr "Paystack Payment Refunded"
 

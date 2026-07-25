@@ -108,6 +108,9 @@ jobs:
       - name: Cumulative refund guard
         run: php tests/refund-guard.php
 
+      - name: Reconciliation decision logic
+        run: php tests/reconciliation-decider.php
+
   # ── 3. Security checks ─────────────────────────────────────────────────────
   security:
     name: Security checks

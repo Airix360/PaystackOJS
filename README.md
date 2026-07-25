@@ -2,7 +2,7 @@
 
 <table>
 <tr>
-<td><strong>Version</strong></td><td>1.2.0</td>
+<td><strong>Version</strong></td><td>1.3.0</td>
 <td><strong>OJS</strong></td><td>3.5.0+</td>
 <td><strong>PHP</strong></td><td>8.1+</td>
 <td><strong>License</strong></td><td>GPL-3.0-or-later</td>
@@ -25,6 +25,7 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 - Webhook authenticity via HMAC-SHA512 over the raw body, compared with `hash_equals()`
 - Optional webhook **IP allowlist** against Paystack's documented source IPs
 - Idempotent fulfilment: DB-backed webhook dedupe (30-day TTL) plus a unique-insert guard that closes the race between the callback and the webhook
+- **Scheduled reconciliation** — an optional PKP scheduled task re-verifies pending payment attempts every 15 minutes, so a payment survives even if both the webhook *and* the payer's browser redirect fail to reach the server
 - Manager **Transactions** list with full and partial refunds
 - User-facing **payment history** and **receipt** pages (ownership-checked)
 - Submission **Payment tab** in the editorial workflow — fee status, amount, gateway, and a Pay Now button (via the [Payment Method Support companion](#submission-payment-tab-companion-addon))
@@ -47,7 +48,7 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 
 ### Manual
 
-1. Download `paystack-1.2.0.0.tar.gz` from the [Releases](../../releases) page.
+1. Download `paystack-1.3.0.0.tar.gz` from the [Releases](../../releases) page.
 2. Unpack into `plugins/paymethod/` so the result is `plugins/paymethod/paystack/`.
 3. In OJS go to **Settings › Website › Plugins › Plugin Categories › Payment Plugins** and enable **Paystack Payment Gateway**.
 4. In **Settings › Distribution › Payments**, enable payments, pick your currency, and choose Paystack as the payment method.
@@ -73,6 +74,9 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 | Test / Live keys | — | Secret + public key pairs from your Paystack dashboard; secrets are masked after saving |
 | Log level | Warning | Verbosity of the plugin log under `files_dir/paystack_logs/` |
 | Webhook IP allowlist | off | Only accept webhooks from Paystack's documented IPs (52.31.139.75, 52.49.173.169, 52.214.14.220). Leave off behind CDNs/proxies that hide the client IP. |
+| Trusted proxy hops | 1 | Number of reverse proxies in front of this server that append to `X-Forwarded-For`; the IP allowlist trusts the hop this many positions from the end of that header. Only relevant when the allowlist above is on. |
+| Scheduled reconciliation | on | Re-verifies pending payment attempts against Paystack every 15 minutes and fulfils any that actually succeeded. Requires a real cron entry running `php lib/pkp/tools/scheduler.php run` — see [Scheduled reconciliation](#scheduled-reconciliation) below. |
+| Reconciliation lookback window | 72 hours | How far back reconciliation looks for pending attempts to re-check; older attempts are assumed abandoned. |
 
 In your Paystack dashboard set the callback and webhook URLs shown on the settings page:
 
@@ -107,6 +111,38 @@ Paystack fires webhook   POST /webhook  (x-paystack-signature)
 
 ---
 
+## Scheduled reconciliation
+
+The webhook and browser callback cover the vast majority of payments, but
+neither is guaranteed: a webhook can fail delivery while the journal server
+is down, and a payer can close their browser before the callback redirect
+completes. If both happen for the same payment, nothing tells OJS it was
+actually paid.
+
+To close that gap, the plugin records a lightweight pending-transaction row
+when a checkout starts, and (when enabled — on by default) a PKP scheduled
+task re-verifies any still-pending row directly against Paystack every 15
+minutes, fulfilling it if Paystack confirms success. It re-applies the exact
+same amount/currency checks the webhook and callback already enforce, so it
+can never fulfil a payment those paths would have rejected, and it's safe to
+run repeatedly — the same fulfilment guard that protects the webhook/callback
+race also protects reconciliation.
+
+This requires the server to actually run OJS's scheduled-task runner, which
+the plugin cannot do on its own:
+
+```
+php lib/pkp/tools/scheduler.php run
+```
+
+Add that to your server's crontab (PKP's own docs recommend running it every
+few minutes). Without a cron entry configured, the webhook and callback paths
+still work exactly as before — reconciliation is a self-healing backstop, not
+a required part of the payment flow. Turn it off, or shorten/lengthen the
+lookback window, under **Settings › Distribution › Payments**.
+
+---
+
 ## Security
 
 ### Temporary OJS APC ownership compatibility
@@ -128,6 +164,7 @@ minimum supported OJS release includes the core fix.
 | Webhook origin | Optional allowlist of Paystack's documented source IPs |
 | Payment tampering | Amount + currency + reference re-verified against the queued payment on callback and webhook |
 | Replay / double-fulfilment | DB-backed dedupe with TTL + unique-insert fulfilment guard |
+| Missed webhook / abandoned redirect | Optional scheduled reconciliation re-verifies pending attempts against Paystack every 15 minutes (see [Scheduled reconciliation](#scheduled-reconciliation)) |
 | Card data / PCI | Never touches the journal server — Paystack-hosted checkout only |
 | Secrets | Masked in the settings UI; masked placeholders are never written back |
 | Transport | HTTPS enforced outside test mode |
@@ -145,6 +182,7 @@ Payment emails are sent automatically using OJS-native templates installed with 
 | `PAYSTACK_PAYMENT_CONFIRMATION` | Payer, on successful payment |
 | `PAYSTACK_PAYMENT_CONFIRMATION_ADMIN` | Journal contact, on successful payment |
 | `PAYSTACK_PAYMENT_FAILED` | Payer, when a charge fails |
+| `PAYSTACK_PAYMENT_REFUNDED` | Payer, on full or partial refund (toggle: `notifyAuthorOnRefund`, on by default) |
 
 Due to an OJS restriction, paymethod plugins are only loaded on payment pages, so these templates cannot be *listed or edited* under **Settings › Emails** from this plugin alone (they still send correctly). The optional **Payment Method Support** companion addon bridges this gap — it makes the templates editable in the OJS UI and adds a theme-agnostic "Payment History" link to the user navigation. The addon is available to sponsors of this plugin; sponsorship funds ongoing maintenance and PKP-compatibility updates. Sponsor via **[GitHub Sponsors](https://github.com/sponsors/thathman)** or contact **hello@airixmedia.com**. Access is automatic: within the hour of sponsoring you'll receive a GitHub invitation to the private addon repository — accept it and download the addon from its Releases page.
 
@@ -216,7 +254,8 @@ plugins/themes/<yourtheme>/
 | 1.0.0 | Released | Hosted checkout + callback + webhook flow with HMAC verification and idempotent fulfilment |
 | 1.1.0 | Released | Optional webhook IP allowlist; TTL'd DB-backed idempotency; PKP-native install migrations |
 | 1.2.0 | Released | Submission-fee article title in payment descriptions; encrypted-at-rest API keys; local refund records with payer notification |
-| 1.3.0 | Planned | Split payments / subaccount support for multi-journal revenue sharing |
+| 1.3.0 | Released | Security-audit follow-ups (TTL'd webhook log purge, cumulative-refund guard, fail-closed fulfilment guard, configurable trusted-proxy hops); optional scheduled reconciliation for missed webhooks |
+| 1.4.0 | Planned | Split payments / subaccount support for multi-journal revenue sharing |
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 
