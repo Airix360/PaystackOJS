@@ -17,6 +17,9 @@
       <tr><th>Amount</th><td>{$payment->getAmount()} {$payment->getCurrencyCode()}</td></tr>
       <tr><th>Reference</th><td>{$meta.reference|escape}</td></tr>
       <tr><th>Transaction ID</th><td>{$meta.transactionId|escape}</td></tr>
+      {if $meta.refundedAmount}
+        <tr><th>Refunded</th><td>{$meta.refundedAmount} {$payment->getCurrencyCode()} ({$meta.refundStatus|escape})</td></tr>
+      {/if}
     </tbody>
   </table>
   <div class="psx-actions">

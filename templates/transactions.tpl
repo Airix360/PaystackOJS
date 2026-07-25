@@ -25,6 +25,7 @@
           <th>{translate key="plugins.paymethod.paystack.transactions.reference"}</th>
           <th></th>
           <th></th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -35,6 +36,7 @@
             <td>{$row.assocId}</td>
             <td>{$row.amountFormatted}</td>
             <td>{$row.reference|escape}</td>
+            <td>{if $row.refundStatus === 'refunded'}<span style="color:#b91c1c;font-weight:600;">Refunded</span>{elseif $row.refundStatus === 'partially_refunded'}<span style="color:#b45309;font-weight:600;">Partially refunded</span>{/if}</td>
             <td>{if $row.viewUrl}<a class="pkpButton" href="{$row.viewUrl}" target="_blank" rel="noopener">{translate key="plugins.paymethod.paystack.transactions.viewOnPaystack"}</a>{/if}</td>
             <td>
               {if $row.detailsUrl}<a class="pkpButton" href="{$row.detailsUrl}" data-modal="ajax">Details</a>{/if}

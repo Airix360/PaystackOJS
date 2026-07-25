@@ -12,5 +12,6 @@
 	<email key="PAYSTACK_PAYMENT_CONFIRMATION" name="mailable.paystack.paymentConfirmation.name" subject="emails.paystack.paymentConfirmation.subject" body="emails.paystack.paymentConfirmation.body" description="mailable.paystack.paymentConfirmation.description" />
 	<email key="PAYSTACK_PAYMENT_CONFIRMATION_ADMIN" name="mailable.paystack.paymentConfirmationAdmin.name" subject="emails.paystack.paymentConfirmationAdmin.subject" body="emails.paystack.paymentConfirmationAdmin.body" description="mailable.paystack.paymentConfirmationAdmin.description" />
 	<email key="PAYSTACK_PAYMENT_FAILED" name="mailable.paystack.paymentFailed.name" subject="emails.paystack.paymentFailed.subject" body="emails.paystack.paymentFailed.body" description="mailable.paystack.paymentFailed.description" />
+	<email key="PAYSTACK_PAYMENT_REFUNDED" name="mailable.paystack.paymentRefunded.name" subject="emails.paystack.paymentRefunded.subject" body="emails.paystack.paymentRefunded.body" description="mailable.paystack.paymentRefunded.description" />
 </emails>
 

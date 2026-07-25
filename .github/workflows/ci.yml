@@ -102,6 +102,12 @@ jobs:
       - name: APC ownership compatibility
         run: php tests/apc-owner-compatibility.php
 
+      - name: Secret-at-rest encryption round-trip
+        run: php tests/secret-cipher.php
+
+      - name: Cumulative refund guard
+        run: php tests/refund-guard.php
+
   # ── 3. Security checks ─────────────────────────────────────────────────────
   security:
     name: Security checks

@@ -2,7 +2,7 @@
 
 <table>
 <tr>
-<td><strong>Version</strong></td><td>1.1.0</td>
+<td><strong>Version</strong></td><td>1.2.0</td>
 <td><strong>OJS</strong></td><td>3.5.0+</td>
 <td><strong>PHP</strong></td><td>8.1+</td>
 <td><strong>License</strong></td><td>GPL-3.0-or-later</td>
@@ -47,7 +47,7 @@ Supported currencies: **NGN, USD, GHS, ZAR, KES, XOF** (your Paystack account mu
 
 ### Manual
 
-1. Download `paystack-1.1.0.0.tar.gz` from the [Releases](../../releases) page.
+1. Download `paystack-1.2.0.0.tar.gz` from the [Releases](../../releases) page.
 2. Unpack into `plugins/paymethod/` so the result is `plugins/paymethod/paystack/`.
 3. In OJS go to **Settings › Website › Plugins › Plugin Categories › Payment Plugins** and enable **Paystack Payment Gateway**.
 4. In **Settings › Distribution › Payments**, enable payments, pick your currency, and choose Paystack as the payment method.
@@ -215,7 +215,8 @@ plugins/themes/<yourtheme>/
 |---------|--------|-------------|
 | 1.0.0 | Released | Hosted checkout + callback + webhook flow with HMAC verification and idempotent fulfilment |
 | 1.1.0 | Released | Optional webhook IP allowlist; TTL'd DB-backed idempotency; PKP-native install migrations |
-| 1.2.0 | Planned | Split payments / subaccount support for multi-journal revenue sharing |
+| 1.2.0 | Released | Submission-fee article title in payment descriptions; encrypted-at-rest API keys; local refund records with payer notification |
+| 1.3.0 | Planned | Split payments / subaccount support for multi-journal revenue sharing |
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 
