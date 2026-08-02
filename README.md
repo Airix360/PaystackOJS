@@ -10,7 +10,7 @@
 </table>
 
 [![CI](https://github.com/thathman/PaystackOJS/actions/workflows/ci.yml/badge.svg)](https://github.com/thathman/PaystackOJS/actions/workflows/ci.yml)
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/thathman)
+[![Sponsor](https://img.shields.io/badge/Sponsor-thathman-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/thathman)
 
 Accept payments in Open Journal Systems 3.5 through [Paystack](https://paystack.com) — article and issue purchases, subscriptions, and publication fees. The reader pays on Paystack's hosted checkout; the plugin verifies every payment server-side before marking it fulfilled.
 
