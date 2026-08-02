@@ -454,8 +454,7 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
             ]));
         }
 
-        $keepHint = '<br><small>' . __('plugins.paymethod.paystack.settings.secretKeyMasked')
-            . ' ' . __('plugins.paymethod.paystack.settings.secretKeyKeepHint') . '</small>';
+        $keepHint = '<br><small>' . __('plugins.paymethod.paystack.settings.secretKeyMasked') . '</small>';
 
         $form
             ->addField(new \PKP\components\forms\FieldText('testPublicKey', [

@@ -570,9 +570,6 @@ msgstr "Paystack Test Mode is enabled."
 msgid "plugins.paymethod.paystack.settings.testModeBanner.body"
 msgstr "Payments will use Paystack test keys and will not charge real cards. Disable Test Mode before enabling live payments."
 
-msgid "plugins.paymethod.paystack.settings.secretKeyKeepHint"
-msgstr "Enter a new key to update, or leave as-is to keep the current value."
-
 msgid "plugins.paymethod.paystack.settings.enforceIpAllowlist"
 msgstr "Webhook IP Allowlist"
 
