@@ -295,6 +295,19 @@ class PaystackPaymentForm extends Form
                 throw new \Exception('Paystack initialization failed: ' . ($responseData['message'] ?? 'Unknown error'));
             }
 
+            // Record this attempt so the reconciliation scheduled task can
+            // heal it later if both the webhook and the browser callback
+            // never arrive (best-effort; never blocks checkout).
+            try {
+                $this->_paystackPaymentPlugin->recordPendingTransaction(
+                    (int) $journal->getId(),
+                    (int) $this->_queuedPayment->getId(),
+                    $reference,
+                    (float) $this->_queuedPayment->getAmount(),
+                    (string) $this->_queuedPayment->getCurrencyCode()
+                );
+            } catch (\Throwable $e) { /* best-effort bookkeeping only */ }
+
             // Redirect to Paystack checkout page
             $authorizationUrl = $responseData['data']['authorization_url'];
             $request->redirectUrl($authorizationUrl);

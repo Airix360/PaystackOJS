@@ -102,6 +102,21 @@ jobs:
       - name: APC ownership compatibility
         run: php tests/apc-owner-compatibility.php
 
+      - name: Secret-at-rest encryption round-trip
+        run: php tests/secret-cipher.php
+
+      - name: Cumulative refund guard
+        run: php tests/refund-guard.php
+
+      - name: Reconciliation decision logic
+        run: php tests/reconciliation-decider.php
+
+      - name: Dispute-handling wiring
+        run: php tests/dispute-handling.php
+
+      - name: Refund method extraction
+        run: php tests/refund-method-extraction.php
+
   # ── 3. Security checks ─────────────────────────────────────────────────────
   security:
     name: Security checks

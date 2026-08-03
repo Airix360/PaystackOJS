@@ -9,6 +9,11 @@
   <div class="psx-card">
     <p><strong>Payment ID:</strong> {$payment->getId()} &nbsp; <strong>Amount:</strong> {$payment->getAmount()} {$payment->getCurrencyCode()}</p>
     <p><strong>Reference:</strong> {$meta.reference|escape}</p>
+    {if $meta.refundedAmount}
+      <p><strong>Already refunded:</strong> {$meta.refundedAmount} {$payment->getCurrencyCode()}
+        {if $meta.refundStatus === 'refunded'}<span style="color:#b91c1c;font-weight:600;"> (fully refunded)</span>{else}<span style="color:#b45309;font-weight:600;"> (partially refunded)</span>{/if}
+      </p>
+    {/if}
     <form method="post" action="{url router=PKP\core\PKPApplication::ROUTE_COMPONENT op="manage" category="paymethod" plugin=$pluginName verb="refund" paymentId=$payment->getId() doRefund=true}">
       {csrf}
       <p>Enter amount to refund (leave empty for full refund):</p>

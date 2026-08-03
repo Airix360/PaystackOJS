@@ -2,6 +2,72 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.4.0 - 2026-07-25
+
+### Added
+- **Dispute/chargeback capture**: the webhook now recognizes Paystack's
+  dispute events (`charge.dispute.create`, `charge.dispute.remind`,
+  `charge.dispute.resolve`), records them in a new `paystack_disputes`
+  table, and emails journal managers a dispute alert (new
+  `PAYSTACK_PAYMENT_DISPUTE` mailable, toggle: `notifyOnDispute`, on by
+  default), mirroring how the sibling FlutterwaveOJS plugin handles its own
+  dispute events. Field names read from Paystack's dispute payload are
+  matched defensively — see the README's
+  [Disputes and chargebacks](README.md#disputes-and-chargebacks) section for
+  the assumption this relies on.
+- **`PaystackPlugin::refundByCompletedPaymentId()`**: a stable, in-process
+  refund entrypoint other plugins can call directly (no HTTP/CSRF), intended
+  for a submission-fee plugin to trigger a real refund on submission
+  decline. Reuses the exact same refund logic as the manager-facing
+  Transactions UI — the cumulative-refund cap, the local refund record, and
+  the payer notification email — via a new shared `performRefund()` helper;
+  the HTTP-facing `manage()` 'refund' action was refactored to call the same
+  helper instead of duplicating the logic.
+
+### Documentation
+- Removed the "Split payments / subaccount support" roadmap item — this is
+  not being built.
+
+## 1.3.0 - 2026-07-25
+
+### Security
+- Webhook audit logs (`paystack_webhook_logs`) are now purged past a 30-day
+  TTL on every webhook hit, matching the existing dedupe-table retention.
+- Refunds are now validated against the *remaining* refundable balance
+  (original amount minus everything already refunded), not just the original
+  total, closing a repeated-click over-refund gap. See
+  `classes/RefundGuard.php` and `tests/refund-guard.php`.
+- Webhook fulfilment now fails **closed**: if the fulfilment-guard table is
+  missing or errors, the webhook is rejected (HTTP 5xx, Paystack retries)
+  instead of silently fulfilling unguarded.
+- The webhook IP allowlist's `X-Forwarded-For` parsing now uses a
+  configurable trusted-proxy hop count (`trustedProxyHops`, default 1)
+  instead of always trusting the last hop.
+
+### Added
+- **Scheduled reconciliation**: an optional PKP scheduled task
+  (`ReconcilePendingTransactions`, every 15 minutes) re-verifies pending
+  payment attempts directly against Paystack and fulfils any that actually
+  succeeded, healing the case where both the webhook and the payer's browser
+  callback fail to reach the server. Pending attempts are recorded in a new
+  `paystack_transactions` table at checkout-start time. On by default;
+  requires the server to run `php lib/pkp/tools/scheduler.php run` via cron.
+  See `classes/ReconciliationDecider.php` and
+  `tests/reconciliation-decider.php`.
+- Local refund records (`storeRefundRecord`) and a payer-facing "payment
+  refunded" notification email (`PAYSTACK_PAYMENT_REFUNDED`) — a refund
+  previously only ever touched the Paystack API and left no local trace.
+
+### Fixed
+- `PaymentRefunded` was never registered with OJS's mailable registry
+  (`addMailable()`), unlike the other three plugin email templates. Fixed
+  for consistency with the rest of the plugin's mailables (sending itself
+  was unaffected — it falls back to a hardcoded template regardless).
+
+### Documentation
+- README now documents the previously-undocumented `trustedProxyHops`
+  setting and the `PAYSTACK_PAYMENT_REFUNDED` email template.
+
 ## 1.2.0 - 2026-06-11
 
 ### Added

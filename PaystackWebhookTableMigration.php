@@ -8,7 +8,8 @@
  *
  * @class PaystackWebhookTableMigration
  *
- * @brief Creates the webhook audit-log, webhook dedupe, and fulfillment-guard tables.
+ * @brief Creates the webhook audit-log, webhook dedupe, fulfillment-guard,
+ * and pending-transaction (reconciliation) tables.
  */
 
 namespace APP\plugins\paymethod\paystack;
@@ -64,10 +65,34 @@ class PaystackWebhookTableMigration extends Migration
                 $table->index(['created_at'], 'psx_guard_created_idx');
             });
         }
+
+        // Pending-transaction ledger: one row per checkout attempt, recorded
+        // at initiate() time (before Paystack has charged anything). Lets the
+        // reconciliation scheduled task re-verify attempts whose webhook
+        // never arrived and the payer never completed the browser redirect
+        // for either — the only case nothing else in the plugin can heal.
+        if (!Schema::hasTable('paystack_transactions')) {
+            Schema::create('paystack_transactions', function (Blueprint $table) {
+                $table->bigIncrements('transaction_id');
+                $table->bigInteger('context_id');
+                $table->bigInteger('queued_payment_id');
+                $table->string('reference', 128);
+                $table->string('status', 32)->default('pending');
+                $table->decimal('amount', 12, 2)->nullable();
+                $table->string('currency', 8)->nullable();
+                $table->timestamp('created_at')->useCurrent();
+                $table->timestamp('updated_at')->useCurrent();
+                $table->unique(['context_id', 'reference'], 'psx_txn_context_reference_unique');
+                $table->index(['context_id', 'status', 'created_at'], 'psx_txn_status_created_idx');
+            });
+        }
     }
 
     public function down(): void
     {
+        if (Schema::hasTable('paystack_transactions')) {
+            Schema::drop('paystack_transactions');
+        }
         if (Schema::hasTable('paystack_fulfillment_guards')) {
             Schema::drop('paystack_fulfillment_guards');
         }
