@@ -1932,9 +1932,49 @@ class PaystackPlugin extends PaymethodPlugin implements HasTaskScheduler
             if (!$this->claimFulfillmentGuard($contextId, $queuedPaymentId, $reference)) {
                 return false;
             }
-            Application::get()->getPaymentManager($journal)->fulfillQueuedPayment($request, $queuedPayment);
+            $this->fulfillQueuedPaymentOrDelegate($request, $journal, $queuedPayment);
             return true;
         });
+    }
+
+    /**
+     * OJSPaymentManager::fulfillQueuedPayment()'s switch has no case for a
+     * plugin-defined payment type (e.g. conferenceSuite's registration/
+     * submission-fee types) and assert(false)s on anything it doesn't
+     * recognize -- confirmed live, this crashed every completion attempt
+     * for such a payment before this fallback existed. Bachs already
+     * avoids calling core's method at all for non-native types, firing
+     * Payment::fulfillCustomQueuedPayment instead and falling back to
+     * manual_review if nothing answers; this mirrors that same hook so one
+     * listener (if the generating plugin registers one) can complete the
+     * payment across every gateway rather than each gateway needing its
+     * own bespoke handling.
+     */
+    private function fulfillQueuedPaymentOrDelegate($request, $journal, $queuedPayment): void
+    {
+        try {
+            Application::get()->getPaymentManager($journal)->fulfillQueuedPayment($request, $queuedPayment);
+            return;
+        } catch (\Throwable $e) {
+            // Fall through to the delegation hook below.
+        }
+
+        $handled = false;
+        $successful = false;
+        Hook::call('Payment::fulfillCustomQueuedPayment', [
+            &$handled,
+            &$successful,
+            $request,
+            $queuedPayment,
+            $this->getName(),
+            [],
+        ]);
+
+        if (!$handled || !$successful) {
+            throw new \RuntimeException(
+                'Paystack: no fulfilment handler completed queued payment type ' . $queuedPayment->getType()
+            );
+        }
     }
 
     private function getHeaderCaseInsensitive(string $name): ?string

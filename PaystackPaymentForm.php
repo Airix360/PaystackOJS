@@ -105,10 +105,24 @@ class PaystackPaymentForm extends Form
             return;
         }
         
-        // Get payment name - OJSPaymentManager has getPaymentName method
+        // Get payment name - OJSPaymentManager has getPaymentName method. The
+        // 'payment.type.<n>' key below only exists for core's own numeric
+        // types (1-9); it isn't a valid fallback for plugin-defined types, so
+        // don't rely on it unless it actually resolved to real text.
         $paymentName = __('payment.type.' . strtolower($this->_queuedPayment->getType()));
+        if ($paymentName === '' || strpos($paymentName, '##') !== false) {
+            $paymentName = __('common.payment');
+        }
         if (method_exists($paymentManager, 'getPaymentName')) {
-            $paymentName = $paymentManager->getPaymentName($this->_queuedPayment);
+            // Plugin-defined payment types (e.g. conferenceSuite's registration/
+            // submission-fee types) have no case in OJSPaymentManager's switch,
+            // which assert(false)s on anything it doesn't recognize. Fall back
+            // to the generic label above rather than crashing the payment page.
+            try {
+                $paymentName = $paymentManager->getPaymentName($this->_queuedPayment);
+            } catch (\Throwable $e) {
+                error_log('Paystack: getPaymentName() failed for payment type ' . $this->_queuedPayment->getType() . ': ' . $e->getMessage());
+            }
         }
         
         // For publication fees, get article name if available
